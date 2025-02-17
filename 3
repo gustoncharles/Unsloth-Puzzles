@@ -1,0 +1,70 @@
+# train_fsdp_qlora.py
+
+import torch
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForCausalLM,
+    BitsAndBytesConfig,
+    TrainingArguments,
+    Trainer
+)
+from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
+
+def main():
+    model_name = "meta-llama/Llama-2-7B-hf"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # 1. 4-bit quantization config
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+
+    # 2. Load base model in 4-bit
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,
+        device_map={"": "cpu"},  # keep on CPU before accelerate does its magic
+    )
+
+    # 3. Prepare for QLoRA + inject adapters
+    model = prepare_model_for_kbit_training(model)
+    lora_config = LoraConfig(
+        r=64,
+        lora_alpha=16,
+        target_modules=["q_proj","k_proj","v_proj","o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+    model = get_peft_model(model, lora_config)
+
+    # 4. Setup training arguments
+    training_args = TrainingArguments(
+        output_dir="fsdp_qlora_checkpoints",
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=2,
+        fp16=True,
+        max_steps=100,  # for demo
+        logging_steps=10,
+        # (Other hyperparameters as needed)
+    )
+
+    # Fake dataset
+    train_dataset = [{"input_ids": torch.randint(0, 32100, (512,)), "labels": torch.randint(0, 32100, (512,))} for _ in range(100)]
+
+    # 5. Define Trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        tokenizer=tokenizer,
+    )
+
+    # 6. Train
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
